@@ -1,21 +1,21 @@
-from flask import Flask, jsonify
+import time
 import requests
+import json
 import yagmail
 import os
 import threading
-import time
+from flask import Flask, jsonify
 
-# Flask app
 app = Flask(__name__)
 
-# Firebase config (use Render env variables!)
-FIREBASE_URL = os.getenv("FIREBASE_URL")  # e.g. https://your-db.firebaseio.com
+# Firebase config from environment variables
+FIREBASE_URL = os.getenv("FIREBASE_URL")
 FIREBASE_SECRET = os.getenv("FIREBASE_SECRET")
 
-# Email config
+# Email credentials
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
-EMAIL_TO = EMAIL_USER
+EMAIL_TO = EMAIL_USER  # alerts sent to yourself
 
 yag = yagmail.SMTP(EMAIL_USER, EMAIL_PASS)
 
@@ -40,19 +40,21 @@ def get_raw_data():
 
 def push_suggestions(suggestions):
     try:
-        requests.patch(f"{FIREBASE_URL}/motor/ml_suggestions.json?auth={FIREBASE_SECRET}",
-                       json=suggestions)
+        requests.patch(
+            f"{FIREBASE_URL}/motor/ml_suggestions.json?auth={FIREBASE_SECRET}",
+            json=suggestions,
+        )
     except Exception as e:
         print("Firebase push exception:", e)
 
 
 def anomaly_detection(data):
     alerts = []
-    if data.get('rpm', 0) > RPM_MAX:
+    if data["rpm"] > RPM_MAX:
         alerts.append("RPM spike")
-    if data.get('current', 0) > CURRENT_MAX:
+    if data["current"] > CURRENT_MAX:
         alerts.append("Current spike")
-    if data.get('temp', 0) > TEMP_MAX:
+    if data["temp"] > TEMP_MAX:
         alerts.append("Temperature high")
     return alerts
 
@@ -66,15 +68,15 @@ def send_alert(alerts, data):
         print("Email send failed:", e)
 
 
-def worker_loop():
+def main_loop():
     while True:
         raw_data = get_raw_data()
         if raw_data:
             alerts = anomaly_detection(raw_data)
             suggestions = {
-                "pwm": raw_data.get('pwm', 0),
-                "motor": "on" if raw_data.get('rpm', 0) > 0 else "off",
-                "alert": ", ".join(alerts) if alerts else ""
+                "pwm": raw_data.get("pwm", 0),
+                "motor": "on" if raw_data.get("rpm", 0) > 0 else "off",
+                "alert": ", ".join(alerts) if alerts else "",
             }
             push_suggestions(suggestions)
             if alerts:
@@ -82,20 +84,15 @@ def worker_loop():
         time.sleep(5)
 
 
-# Start background thread after app loads
-@app.before_first_request
-def start_worker():
-    thread = threading.Thread(target=worker_loop, daemon=True)
-    thread.start()
+# ✅ Start background thread on app startup
+threading.Thread(target=main_loop, daemon=True).start()
 
 
-# Test route
 @app.route("/")
 def home():
     return jsonify({"status": "ok", "message": "🚀 IoT Cloud Service Running"})
 
 
-@app.route("/ping")
-def ping():
-    return "pong"
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
 
