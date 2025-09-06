@@ -1,3 +1,6 @@
+
+
+
 import time
 import requests
 import json
@@ -13,7 +16,8 @@ FIREBASE_SECRET = os.getenv("AIzaSyC5Ip92e9BAc06CXyDm5Zq_x9szZmu4NKM")
 
 # Email config
 EMAIL_USER = os.getenv("akashharumasa@gmail.com")
-EMAIL_PASS = os.getenv("akashvigneshgaming@gmail.com")
+EMAIL_PASS = os.getenv("atqw xrfu Inud nssq")
+
 EMAIL_TO = EMAIL_USER  # you can alert yourself
 
 yag = yagmail.SMTP(EMAIL_USER, EMAIL_PASS)
