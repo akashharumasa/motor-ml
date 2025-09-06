@@ -1,98 +1,111 @@
-import time
-import requests
-import json
-import yagmail
 import os
+import smtplib
 import threading
+import time
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from flask import Flask, jsonify
+import firebase_admin
+from firebase_admin import credentials, db
 
-app = Flask(__name__)
-
-# Firebase config from environment variables
-FIREBASE_URL = os.getenv("FIREBASE_URL")
-FIREBASE_SECRET = os.getenv("FIREBASE_SECRET")
-
-# Email credentials
+# ---------------- ENV VARIABLES ----------------
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
-EMAIL_TO = EMAIL_USER  # alerts sent to yourself
+FIREBASE_URL = os.getenv("FIREBASE_URL")
+FIREBASE_SECRET = os.getenv("FIREBASE_SECRET")  # optional if using serviceAccount
 
-yag = yagmail.SMTP(EMAIL_USER, EMAIL_PASS)
+# ---------------- THRESHOLDS ----------------
+RPM_MAX = 5000
+CURRENT_MAX = 5.0  # Amps
+VOLTAGE_MIN = 10.0
+VOLTAGE_MAX = 15.0
 
-# Thresholds
-RPM_MAX = 20000
-CURRENT_MAX = 5.0
-TEMP_MAX = 70
+# ---------------- FLASK APP ----------------
+app = Flask(__name__)
 
+# ---------------- FIREBASE INIT ----------------
+if not firebase_admin._apps:
+    cred = credentials.Certificate({
+        "type": "service_account",
+        "project_id": "iotpro-685a2",
+        "private_key_id": "dummy",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----\n",
+        "client_email": "firebase-adminsdk@iotpro-685a2.iam.gserviceaccount.com",
+        "client_id": "dummy",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk"
+    })
+    firebase_admin.initialize_app(cred, {
+        "databaseURL": FIREBASE_URL
+    })
 
-def get_raw_data():
+# ---------------- EMAIL ALERT ----------------
+def send_email_alert(subject, body):
     try:
-        r = requests.get(f"{FIREBASE_URL}/motor/raw.json?auth={FIREBASE_SECRET}")
-        if r.status_code == 200:
-            return r.json()
-        else:
-            print("Firebase read error", r.status_code)
-            return None
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_USER
+        msg["To"] = EMAIL_USER
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.sendmail(EMAIL_USER, EMAIL_USER, msg.as_string())
+        server.quit()
+        print("✅ Email sent:", subject)
     except Exception as e:
-        print("Firebase read exception:", e)
-        return None
+        print("❌ Email failed:", e)
 
-
-def push_suggestions(suggestions):
-    try:
-        requests.patch(
-            f"{FIREBASE_URL}/motor/ml_suggestions.json?auth={FIREBASE_SECRET}",
-            json=suggestions,
-        )
-    except Exception as e:
-        print("Firebase push exception:", e)
-
-
+# ---------------- ANOMALY DETECTION ----------------
 def anomaly_detection(data):
     alerts = []
-    if data["rpm"] > RPM_MAX:
-        alerts.append("RPM spike")
-    if data["current"] > CURRENT_MAX:
-        alerts.append("Current spike")
-    if data["temp"] > TEMP_MAX:
-        alerts.append("Temperature high")
+
+    # Safe get to avoid KeyError
+    rpm = data.get("rpm")
+    current = data.get("current")
+    voltage = data.get("voltage")
+
+    if rpm is not None and rpm > RPM_MAX:
+        alerts.append(f"⚠️ RPM too high: {rpm}")
+
+    if current is not None and current > CURRENT_MAX:
+        alerts.append(f"⚠️ Current too high: {current}")
+
+    if voltage is not None and (voltage < VOLTAGE_MIN or voltage > VOLTAGE_MAX):
+        alerts.append(f"⚠️ Voltage anomaly: {voltage}")
+
     return alerts
 
-
-def send_alert(alerts, data):
-    content = f"Motor Alert!\n\nAlerts: {', '.join(alerts)}\nData: {data}"
-    try:
-        yag.send(EMAIL_TO, "Motor Anomaly Alert", content)
-        print("✅ Email alert sent")
-    except Exception as e:
-        print("Email send failed:", e)
-
-
+# ---------------- BACKGROUND LOOP ----------------
 def main_loop():
+    ref = db.reference("motor_data")
     while True:
-        raw_data = get_raw_data()
-        if raw_data:
+        try:
+            raw_data = ref.get() or {}
+            print("Incoming data:", raw_data)
+
             alerts = anomaly_detection(raw_data)
-            suggestions = {
-                "pwm": raw_data.get("pwm", 0),
-                "motor": "on" if raw_data.get("rpm", 0) > 0 else "off",
-                "alert": ", ".join(alerts) if alerts else "",
-            }
-            push_suggestions(suggestions)
-            if alerts:
-                send_alert(alerts, raw_data)
+            for alert in alerts:
+                send_email_alert("Motor Alert", alert)
+
+        except Exception as e:
+            print("❌ Error in loop:", e)
+
         time.sleep(5)
 
-
-# ✅ Start background thread on app startup
-threading.Thread(target=main_loop, daemon=True).start()
-
-
+# ---------------- ROUTES ----------------
 @app.route("/")
 def home():
-    return jsonify({"status": "ok", "message": "🚀 IoT Cloud Service Running"})
+    return jsonify({"status": "running", "service": "motor-ml"})
 
-
+# ---------------- START ----------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
-
+    # Run background loop
+    t = threading.Thread(target=main_loop, daemon=True)
+    t.start()
+    
+    # Start Flask server
+    app.run(host="0.0.0.0", port=10000)
