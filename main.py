@@ -8,6 +8,8 @@ import yagmail
 import os
 from dotenv import load_dotenv
 
+app = Flask(__name__)
+
 load_dotenv()
 
 # Firebase config
