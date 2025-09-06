@@ -14,9 +14,9 @@ load_dotenv()
 FIREBASE_URL = os.getenv("https://iotpro-685a2-default-rtdb.firebaseio.com")  # ending with '/'
 FIREBASE_SECRET = os.getenv("AIzaSyC5Ip92e9BAc06CXyDm5Zq_x9szZmu4NKM")
 
-# Email config
-EMAIL_USER = os.getenv("akashharumasa@gmail.com")
-EMAIL_PASS = os.getenv("atqw xrfu Inud nssq")
+
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
 
 EMAIL_TO = EMAIL_USER  # you can alert yourself
 
