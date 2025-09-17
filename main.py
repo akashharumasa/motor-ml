@@ -1,88 +1,110 @@
+# main.py (Isolation Forest anomaly detection API with dual Firebase write)
+from fastapi import FastAPI, HTTPException
+from datetime import datetime
+import numpy as np
+import joblib
 import os
-import json
-import threading
-import time
-from flask import Flask, jsonify
 import firebase_admin
 from firebase_admin import credentials, db
 
-# -----------------------------
-# Firebase Setup (from env var)
-# -----------------------------
-firebase_key_json = os.getenv("FIREBASE_KEY")
+# --- Firebase config ---
+SERVICE_ACCOUNT_FILE = "serviceAccountKey.json"
+DATABASE_URL = "https://iotpro-685a2-default-rtdb.firebaseio.com"
 
-if not firebase_key_json:
-    raise ValueError("❌ FIREBASE_KEY environment variable not set in Render!")
+# Initialize Firebase
+if not firebase_admin._apps:
+    cred = credentials.Certificate(SERVICE_ACCOUNT_FILE)
+    firebase_admin.initialize_app(cred, {"databaseURL": DATABASE_URL})
 
-# If Render stored it with \n instead of real newlines, fix it
-firebase_key_json = firebase_key_json.replace('\\n', '\n')
+app = FastAPI()
 
-firebase_key_dict = json.loads(firebase_key_json)
-
-cred = credentials.Certificate(firebase_key_dict)
-
-firebase_admin.initialize_app(cred, {
-    "databaseURL": "https://your-project-id.firebaseio.com/"  # 👈 replace with your DB URL
-})
-
-# -----------------------------
-# Flask App
-# -----------------------------
-app = Flask(__name__)
-
-# Example thresholds
-RPM_MAX = 5000
-TEMP_MAX = 80
-CURR_MAX = 10
-
-def anomaly_detection(data):
-    """Check if motor values exceed limits"""
-    alerts = []
-    if "rpm" in data and data["rpm"] > RPM_MAX:
-        alerts.append("High RPM detected")
-    if "temperature" in data and data["temperature"] > TEMP_MAX:
-        alerts.append("Overheating detected")
-    if "current" in data and data["current"] > CURR_MAX:
-        alerts.append("Overcurrent detected")
-    return alerts
-
-def fetch_motor_data():
-    """Fetch motor data from Firebase"""
-    ref = db.reference("/motor_data")
-    data = ref.get()
-    return data or {}
-
-def main_loop():
-    """Background loop to monitor data"""
-    while True:
-        raw_data = fetch_motor_data()
-        alerts = anomaly_detection(raw_data)
-
-        if alerts:
-            print("⚠️ Alerts:", alerts)
+# --- Load per-PWM models safely ---
+models = {}
+for pwm in [64, 128, 192, 255]:
+    model_path = f"models/model_pwm{pwm}.pkl"
+    if os.path.exists(model_path):
+        loaded = joblib.load(model_path)
+        # Each file contains (scaler, model)
+        if isinstance(loaded, tuple) and len(loaded) == 2:
+            models[pwm] = {"scaler": loaded[0], "model": loaded[1]}
         else:
-            print("✅ Motor running normally")
+            models[pwm] = {"scaler": None, "model": loaded}
+        print(f"✅ Loaded model for PWM {pwm}")
+    else:
+        print(f"⚠️ Model file not found: {model_path}")
 
-        time.sleep(5)  # check every 5 seconds
+# Features now only Voltage + Current_mA
+features = ["Voltage", "Current_mA"]
 
-# -----------------------------
-# API Routes
-# -----------------------------
-@app.route("/")
+# --- Classify a sample ---
+def classify_sample(sample):
+    pwm = int(sample.get("PWM", 0))
+    entry = models.get(pwm)
+    if not entry or not entry.get("model"):
+        return f"Error: No model for PWM {pwm}"
+
+    # Extract just the two features
+    X = np.array([[float(sample.get(f, 0)) for f in features]])
+
+    scaler = entry.get("scaler")
+    if scaler:
+        X = scaler.transform(X)
+
+    model = entry["model"]
+    pred = model.predict(X)  # +1 = normal, -1 = anomaly
+    return "Normal" if pred[0] == 1 else "Bad"
+
+# --- PWM Normalizer ---
+def normalize_pwm(pwm):
+    if pwm == 191:   # 75% button sends 191
+        return 192
+    return pwm
+
+# --- Routes ---
+@app.get("/")
 def home():
-    return jsonify({"status": "ok", "message": "Motor monitoring system running"})
+    return {"message": "Isolation Forest Anomaly Detection API running"}
 
-@app.route("/data")
-def get_data():
-    data = fetch_motor_data()
-    alerts = anomaly_detection(data)
-    return jsonify({"data": data, "alerts": alerts})
+@app.post("/predict")
+def predict(payload: dict):
+    pwm = int(payload.get("PWM", -1))
+    pwm = normalize_pwm(pwm)  # 191 → 192
 
-# -----------------------------
-# Start background thread + app
-# -----------------------------
-if __name__ == "__main__":
-    t = threading.Thread(target=main_loop, daemon=True)
-    t.start()
-    app.run(host="0.0.0.0", port=5000)
+    # Update payload PWM so classifier sees normalized value
+    payload["PWM"] = pwm
+
+    if pwm == 0:
+        status = "Motor Off"
+    elif pwm in [64, 128, 192, 255]:
+        try:
+            status = classify_sample(payload)  # now sees 192
+        except Exception as e:
+            status = f"Prediction failed: {e}"
+    else:
+        status = "Unknown PWM"
+
+    # --- Write results to Firebase ---
+    try:
+        root_ref = db.reference("/")
+        data = {
+            "PWM": pwm,
+            "Status": status,
+            "Voltage": payload.get("Voltage"),
+            "Current_mA": payload.get("Current_mA"),
+            "Power_mW": payload.get("Power_mW"),
+            "Temp_C": payload.get("Temp_C"),
+            "Vib_per_s": payload.get("Vib_per_s"),
+            "CheckedAt": datetime.utcnow().isoformat() + "Z"
+        }
+
+        # Keep full history
+        root_ref.child("SensorDataHistory").push(data)
+
+        # Always overwrite latest
+        root_ref.child("SensorDataLatest").set(data)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Firebase write failed: {e}")
+
+    return {"status": status, "written_to": ["/SensorDataLatest", "/SensorDataHistory"]}
 
